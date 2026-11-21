@@ -139,13 +139,6 @@ data class BlockPiece(
             listOf(
                 listOf(false, true, true),
                 listOf(true, true, false)
-            ),
-
-            // Kríž / Plus 3x3
-            listOf(
-                listOf(false, true, false),
-                listOf(true, true, true),
-                listOf(false, true, false)
             )
         )
 

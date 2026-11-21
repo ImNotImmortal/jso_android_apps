@@ -31,6 +31,12 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun forceSelectPiece(index: Int?) {
+        _uiState.update { state ->
+            state.copy(selectedPieceIndex = index, hoverRow = null, hoverCol = null)
+        }
+    }
+
     fun updateHoverCell(row: Int?, col: Int?) {
         _uiState.update { state ->
             if (state.hoverRow != row || state.hoverCol != col) {

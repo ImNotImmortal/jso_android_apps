@@ -1,6 +1,12 @@
 package com.example.blockpuzzle.ui
 
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -45,16 +51,19 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.blockpuzzle.model.BOARD_SIZE
+import kotlin.math.abs
 import com.example.blockpuzzle.model.BlockPiece
 import com.example.blockpuzzle.model.GameState
 import com.example.blockpuzzle.viewmodel.GameViewModel
@@ -65,13 +74,18 @@ fun BlockPuzzleGameScreen(
     gameViewModel: GameViewModel = viewModel()
 ) {
     val state by gameViewModel.uiState.collectAsState()
+    val density = LocalDensity.current
+    val haptic = LocalHapticFeedback.current
 
     var boardBounds by remember { mutableStateOf<Rect?>(null) }
     var draggingPieceIndex by remember { mutableStateOf<Int?>(null) }
     var dragPositionInWindow by remember { mutableStateOf<Offset?>(null) }
+    var initialDragPosition by remember { mutableStateOf<Offset?>(null) }
 
     var currentHoverRow by remember { mutableStateOf<Int?>(null) }
     var currentHoverCol by remember { mutableStateOf<Int?>(null) }
+
+    val boardPaddingPx = with(density) { 12.dp.toPx() }
 
     Surface(
         modifier = Modifier
@@ -94,7 +108,7 @@ fun BlockPuzzleGameScreen(
                     onRestartClick = { gameViewModel.restartGame() }
                 )
 
-                // 2. Hracia plocha 8x8 (s priamym vykresľovaním reálneho tvaru VRCHOLOM nad existujúce bloky)
+                // 2. Hracia plocha 8x8
                 BoardSection(
                     gameState = state,
                     hoverRow = currentHoverRow,
@@ -116,13 +130,15 @@ fun BlockPuzzleGameScreen(
                 PieceDockSection(
                     availablePieces = state.availablePieces,
                     selectedIndex = state.selectedPieceIndex,
+                    draggingIndex = draggingPieceIndex,
                     onPieceSelect = { index ->
                         gameViewModel.selectPiece(index)
                     },
                     onDragStart = { index, initialPosition ->
-                        gameViewModel.selectPiece(index)
+                        gameViewModel.forceSelectPiece(index)
                         draggingPieceIndex = index
                         dragPositionInWindow = initialPosition
+                        initialDragPosition = initialPosition
                     },
                     onDrag = { mousePosInWindow ->
                         dragPositionInWindow = mousePosInWindow
@@ -130,27 +146,85 @@ fun BlockPuzzleGameScreen(
                         val activeIndex = draggingPieceIndex
                         val piece = if (activeIndex != null) state.availablePieces.getOrNull(activeIndex) else null
 
-                        if (bounds != null && piece != null && bounds.contains(mousePosInWindow)) {
-                            val cellSize = bounds.width / BOARD_SIZE
-                            val pieceWidthPx = piece.cols * cellSize
-                            val pieceHeightPx = piece.rows * cellSize
+                        if (bounds != null && piece != null) {
+                            val boardLeft = bounds.left + boardPaddingPx
+                            val boardTop = bounds.top + boardPaddingPx
+                            val boardRight = bounds.right - boardPaddingPx
+                            val boardBottom = bounds.bottom - boardPaddingPx
+                            val gridWidth = bounds.width - (2 * boardPaddingPx)
+                            val cellSizePx = gridWidth / BOARD_SIZE
 
-                            val pointerOnBoard = mousePosInWindow - bounds.topLeft
-                            val pieceTopLeftOnBoard = pointerOnBoard - Offset(pieceWidthPx / 2f, pieceHeightPx / 2f)
+                            val pieceWidthPx = piece.cols * cellSizePx
+                            val pieceHeightPx = piece.rows * cellSizePx
 
-                            val col = round(pieceTopLeftOnBoard.x / cellSize).toInt().coerceIn(0, BOARD_SIZE - piece.cols)
-                            val row = round(pieceTopLeftOnBoard.y / cellSize).toInt().coerceIn(0, BOARD_SIZE - piece.rows)
+                            val startPos = initialDragPosition ?: mousePosInWindow
+                            val fingerX = mousePosInWindow.x
+                            val fingerY = mousePosInWindow.y
 
-                            if (currentHoverRow != row || currentHoverCol != col) {
-                                currentHoverRow = row
-                                currentHoverCol = col
-                                gameViewModel.updateHoverCell(row, col)
+                            val deltaX = fingerX - startPos.x
+                            val deltaY = startPos.y - fingerY
+
+                            val baseOffsetY = with(density) { 30.dp.toPx() }
+                            val extraOffsetY = (deltaY * 0.6f).coerceAtLeast(0f)
+                            val extraOffsetX = deltaX * 0.4f
+
+                            val renderX = fingerX - pieceWidthPx / 2f + extraOffsetX
+                            val renderY = fingerY - pieceHeightPx / 2f - baseOffsetY - extraOffsetY
+
+                            val relX = renderX - boardLeft
+                            val relY = renderY - boardTop
+
+                            val maxCol = BOARD_SIZE - piece.cols
+                            val maxRow = BOARD_SIZE - piece.rows
+
+                            val rawCol = round(relX / cellSizePx).toInt()
+                            val rawRow = round(relY / cellSizePx).toInt()
+
+                            val col: Int
+                            val row: Int
+
+                            if (currentHoverCol != null && currentHoverRow != null) {
+                                val curC = currentHoverCol!!
+                                val curR = currentHoverRow!!
+                                val cellOffsetX = relX - (curC * cellSizePx)
+                                val cellOffsetY = relY - (curR * cellSizePx)
+
+                                // Magnetická tolerancia (hysteresis deadzone): podrží aktuálnu bunku, kým neprekročíme 20%-80% hranicu
+                                if (abs(rawCol - curC) <= 1 && abs(rawRow - curR) <= 1 &&
+                                    cellOffsetX in (cellSizePx * 0.2f)..(cellSizePx * 0.8f) &&
+                                    cellOffsetY in (cellSizePx * 0.2f)..(cellSizePx * 0.8f)) {
+                                    col = curC
+                                    row = curR
+                                } else {
+                                    col = rawCol.coerceIn(0, maxCol)
+                                    row = rawRow.coerceIn(0, maxRow)
+                                }
+                            } else {
+                                col = rawCol.coerceIn(0, maxCol)
+                                row = rawRow.coerceIn(0, maxRow)
+                            }
+
+                            val isInsideGrid = col in 0..maxCol && row in 0..maxRow
+                            val margin = cellSizePx * 0.5f
+                            val isNearBoard = renderX + pieceWidthPx >= (boardLeft - margin) && renderX <= (boardRight + margin) &&
+                                    renderY + pieceHeightPx >= (boardTop - margin) && renderY <= (boardBottom + margin)
+
+                            if (isNearBoard && isInsideGrid && gameViewModel.canPlacePiece(piece, state.board, row, col)) {
+                                if (currentHoverRow != row || currentHoverCol != col) {
+                                    currentHoverRow = row
+                                    currentHoverCol = col
+                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                }
+                            } else {
+                                if (currentHoverRow != null || currentHoverCol != null) {
+                                    currentHoverRow = null
+                                    currentHoverCol = null
+                                }
                             }
                         } else {
                             if (currentHoverRow != null || currentHoverCol != null) {
                                 currentHoverRow = null
                                 currentHoverCol = null
-                                gameViewModel.updateHoverCell(null, null)
                             }
                         }
                     },
@@ -159,9 +233,11 @@ fun BlockPuzzleGameScreen(
                         val col = currentHoverCol
                         if (row != null && col != null) {
                             gameViewModel.placeSelectedPieceAt(row, col)
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                         }
                         draggingPieceIndex = null
                         dragPositionInWindow = null
+                        initialDragPosition = null
                         currentHoverRow = null
                         currentHoverCol = null
                         gameViewModel.updateHoverCell(null, null)
@@ -169,35 +245,52 @@ fun BlockPuzzleGameScreen(
                 )
             }
 
-            // Plynulý plávajúci náhľad ťahaného bloku sprevádzajúci kurzor/prst bez prerušenia
-            val dragPos = dragPositionInWindow
+            // Plynulý plávajúci náhľad ťahaného bloku s dynamickým elastickým predstihom
             val activeIndex = draggingPieceIndex
 
-            if (dragPos != null && activeIndex != null) {
+            if (activeIndex != null) {
                 val piece = state.availablePieces.getOrNull(activeIndex)
-                if (piece != null) {
-                    val density = LocalDensity.current
-                    val dockCellSizeDp = 22.dp
-                    val dockCellSizePx = with(density) { dockCellSizeDp.toPx() }
+                val bounds = boardBounds
 
-                    val pieceWidthPx = piece.cols * dockCellSizePx
-                    val pieceHeightPx = piece.rows * dockCellSizePx
+                if (piece != null && bounds != null) {
+                    val gridWidth = bounds.width - (2 * boardPaddingPx)
+                    val cellSizePx = gridWidth / BOARD_SIZE
+                    val cellSizeDp = with(density) { cellSizePx.toDp() }
 
-                    // Odsadenie 35dp nahor, aby prst/kurzor neprekrýval tvar
-                    val renderX = dragPos.x - pieceWidthPx / 2f
-                    val renderY = dragPos.y - pieceHeightPx / 2f - with(density) { 35.dp.toPx() }
+                    val pieceWidthPx = piece.cols * cellSizePx
+                    val pieceHeightPx = piece.rows * cellSizePx
 
                     Box(
                         modifier = Modifier
                             .graphicsLayer {
-                                translationX = renderX
-                                translationY = renderY
+                                val pos = dragPositionInWindow
+                                val startPos = initialDragPosition ?: pos ?: Offset.Zero
+                                if (pos != null) {
+                                    val fingerX = pos.x
+                                    val fingerY = pos.y
+
+                                    val deltaX = fingerX - startPos.x
+                                    val deltaY = startPos.y - fingerY
+
+                                    val baseOffsetY = with(density) { 30.dp.toPx() }
+                                    val extraOffsetY = (deltaY * 0.6f).coerceAtLeast(0f)
+                                    val extraOffsetX = deltaX * 0.4f
+
+                                    translationX = fingerX - pieceWidthPx / 2f + extraOffsetX
+                                    translationY = fingerY - pieceHeightPx / 2f - baseOffsetY - extraOffsetY
+                                    shadowElevation = 16.dp.toPx()
+                                    shape = RoundedCornerShape(8.dp)
+                                    clip = false
+                                } else {
+                                    alpha = 0f
+                                }
                             }
                     ) {
                         PieceShapeView(
                             piece = piece,
-                            cellSize = dockCellSizeDp,
-                            cellPadding = 1.5.dp
+                            cellSize = cellSizeDp,
+                            cellPadding = 2.dp,
+                            cornerRadius = 6.dp
                         )
                     }
                 }
@@ -319,6 +412,42 @@ private fun ScoreCard(
     }
 }
 
+private fun getClearingLines(
+    board: List<List<Color?>>,
+    piece: BlockPiece,
+    startRow: Int,
+    startCol: Int
+): Pair<Set<Int>, Set<Int>> {
+    val simBoard = board.map { it.toMutableList() }
+    for (r in 0 until piece.rows) {
+        for (c in 0 until piece.cols) {
+            if (piece.shape[r][c]) {
+                val br = startRow + r
+                val bc = startCol + c
+                if (br in 0 until BOARD_SIZE && bc in 0 until BOARD_SIZE) {
+                    simBoard[br][bc] = piece.color
+                }
+            }
+        }
+    }
+
+    val fullRows = mutableSetOf<Int>()
+    for (r in 0 until BOARD_SIZE) {
+        if (simBoard[r].all { it != null }) {
+            fullRows.add(r)
+        }
+    }
+
+    val fullCols = mutableSetOf<Int>()
+    for (c in 0 until BOARD_SIZE) {
+        if ((0 until BOARD_SIZE).all { r -> simBoard[r][c] != null }) {
+            fullCols.add(c)
+        }
+    }
+
+    return Pair(fullRows, fullCols)
+}
+
 @Composable
 private fun BoardSection(
     gameState: GameState,
@@ -346,6 +475,10 @@ private fun BoardSection(
             canPlacePiece(selectedPiece, hoverRow, hoverCol)
         } else false
 
+        val (clearingRows, clearingCols) = if (selectedPiece != null && hoverRow != null && hoverCol != null && isValidPlacement) {
+            getClearingLines(gameState.board, selectedPiece, hoverRow, hoverCol)
+        } else Pair(emptySet(), emptySet())
+
         Column(modifier = Modifier.fillMaxSize()) {
             for (r in 0 until BOARD_SIZE) {
                 Row(modifier = Modifier.weight(1f)) {
@@ -361,6 +494,7 @@ private fun BoardSection(
                         } else false
 
                         val previewColor = if (isPreviewCell && selectedPiece != null) selectedPiece.color else null
+                        val isClearingLineCell = r in clearingRows || c in clearingCols
 
                         BoardCell(
                             modifier = Modifier
@@ -372,7 +506,8 @@ private fun BoardSection(
                                 },
                             color = cellColor,
                             previewColor = previewColor,
-                            isValidPreview = isValidPlacement
+                            isValidPreview = isValidPlacement,
+                            isClearingLine = isClearingLineCell
                         )
                     }
                 }
@@ -386,14 +521,40 @@ private fun BoardCell(
     modifier: Modifier,
     color: Color?,
     previewColor: Color?,
-    isValidPreview: Boolean
+    isValidPreview: Boolean,
+    isClearingLine: Boolean
 ) {
-    // Náhľad ťahaného tvaru (previewColor) má VŽDY prednosť pred existujúcimi blokmi (color), aby sa tvar neorezával
+    val infiniteTransition = rememberInfiniteTransition(label = "clearingGlow")
+    val glowAlpha by infiniteTransition.animateFloat(
+        initialValue = 0.55f,
+        targetValue = 0.95f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(350, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "glowAlpha"
+    )
+
     val backgroundColor = when {
-        previewColor != null && isValidPreview -> previewColor.copy(alpha = 0.9f)
-        previewColor != null && !isValidPreview -> previewColor.copy(alpha = 0.45f)
+        isClearingLine -> Color(0xFFFFD54F).copy(alpha = glowAlpha)
+        previewColor != null && isValidPreview -> previewColor.copy(alpha = 0.55f)
+        previewColor != null && !isValidPreview -> Color(0xFFEF5350).copy(alpha = 0.35f)
         color != null -> color
         else -> Color(0xFF242438)
+    }
+
+    val borderColor = when {
+        isClearingLine -> Color(0xFFFFD700)
+        previewColor != null && isValidPreview -> previewColor.copy(alpha = 0.9f)
+        previewColor != null && !isValidPreview -> Color(0xFFFF5252).copy(alpha = 0.8f)
+        color != null -> color.copy(alpha = 0.8f)
+        else -> Color(0xFF2E2E48)
+    }
+
+    val borderWidth = when {
+        isClearingLine -> 2.5.dp
+        previewColor != null -> 2.dp
+        else -> 1.dp
     }
 
     Box(
@@ -401,13 +562,8 @@ private fun BoardCell(
             .clip(RoundedCornerShape(6.dp))
             .background(backgroundColor)
             .border(
-                width = if (previewColor != null) 2.dp else 1.dp,
-                color = when {
-                    previewColor != null && isValidPreview -> previewColor
-                    previewColor != null && !isValidPreview -> Color(0xFFFF5252)
-                    color != null -> color.copy(alpha = 0.8f)
-                    else -> Color(0xFF2E2E48)
-                },
+                width = borderWidth,
+                color = borderColor,
                 shape = RoundedCornerShape(6.dp)
             )
     )
@@ -417,6 +573,7 @@ private fun BoardCell(
 private fun PieceDockSection(
     availablePieces: List<BlockPiece?>,
     selectedIndex: Int?,
+    draggingIndex: Int?,
     onPieceSelect: (Int) -> Unit,
     onDragStart: (index: Int, initialPosition: Offset) -> Unit,
     onDrag: (position: Offset) -> Unit,
@@ -438,6 +595,7 @@ private fun PieceDockSection(
         ) {
             availablePieces.forEachIndexed { index, piece ->
                 val isSelected = selectedIndex == index
+                val isBeingDragged = draggingIndex == index
 
                 Box(
                     modifier = Modifier
@@ -450,6 +608,7 @@ private fun PieceDockSection(
                             index = index,
                             piece = piece,
                             isSelected = isSelected,
+                            isBeingDragged = isBeingDragged,
                             onClick = { onPieceSelect(index) },
                             onDragStart = onDragStart,
                             onDrag = onDrag,
@@ -458,7 +617,8 @@ private fun PieceDockSection(
                     } else {
                         Box(
                             modifier = Modifier
-                                .size(70.dp)
+                                .fillMaxWidth()
+                                .height(70.dp)
                                 .clip(RoundedCornerShape(12.dp))
                                 .background(Color(0xFF151522))
                                 .border(1.dp, Color(0xFF2A2A3D), RoundedCornerShape(12.dp))
@@ -475,35 +635,46 @@ private fun PiecePreviewCard(
     index: Int,
     piece: BlockPiece,
     isSelected: Boolean,
+    isBeingDragged: Boolean,
     onClick: () -> Unit,
     onDragStart: (index: Int, initialPosition: Offset) -> Unit,
     onDrag: (position: Offset) -> Unit,
     onDragEnd: () -> Unit
 ) {
+    val haptic = LocalHapticFeedback.current
+
     val scale by animateFloatAsState(
-        targetValue = if (isSelected) 1.15f else 1.0f,
+        targetValue = when {
+            isBeingDragged -> 0.95f
+            isSelected -> 1.08f
+            else -> 1.0f
+        },
         label = "pieceScale"
+    )
+    val alpha by animateFloatAsState(
+        targetValue = if (isBeingDragged) 0.35f else 1.0f,
+        label = "pieceAlpha"
     )
 
     var cardPositionInWindow by remember { mutableStateOf(Offset.Zero) }
+    var currentDragPos by remember { mutableStateOf(Offset.Zero) }
 
     Box(
         modifier = Modifier
+            .fillMaxWidth()
+            .height(70.dp)
             .scale(scale)
-            .clip(RoundedCornerShape(12.dp))
-            .background(if (isSelected) Color(0xFF2D2D4A) else Color(0xFF161625))
-            .border(
-                width = if (isSelected) 2.dp else 1.dp,
-                color = if (isSelected) piece.color else Color(0xFF2E2E48),
-                shape = RoundedCornerShape(12.dp)
-            )
+            .graphicsLayer { this.alpha = alpha }
             .onGloballyPositioned { coordinates ->
                 cardPositionInWindow = coordinates.boundsInWindow().topLeft
             }
             .pointerInput(index) {
                 detectDragGestures(
                     onDragStart = { startOffset ->
-                        onDragStart(index, cardPositionInWindow + startOffset)
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        val startPos = cardPositionInWindow + startOffset
+                        currentDragPos = startPos
+                        onDragStart(index, startPos)
                     },
                     onDragEnd = {
                         onDragEnd()
@@ -511,14 +682,14 @@ private fun PiecePreviewCard(
                     onDragCancel = {
                         onDragEnd()
                     },
-                    onDrag = { change, _ ->
+                    onDrag = { change, dragAmount ->
                         change.consume()
-                        onDrag(cardPositionInWindow + change.position)
+                        currentDragPos += dragAmount
+                        onDrag(currentDragPos)
                     }
                 )
             }
-            .clickable { onClick() }
-            .padding(12.dp),
+            .clickable { onClick() },
         contentAlignment = Alignment.Center
     ) {
         PieceShapeView(piece = piece)
@@ -529,7 +700,8 @@ private fun PiecePreviewCard(
 private fun PieceShapeView(
     piece: BlockPiece,
     cellSize: Dp = 16.dp,
-    cellPadding: Dp = 1.5.dp
+    cellPadding: Dp = 1.5.dp,
+    cornerRadius: Dp = 3.dp
 ) {
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -543,7 +715,7 @@ private fun PieceShapeView(
                         modifier = Modifier
                             .size(cellSize)
                             .padding(cellPadding)
-                            .clip(RoundedCornerShape(3.dp))
+                            .clip(RoundedCornerShape(cornerRadius))
                             .background(
                                 if (isFilled) piece.color else Color.Transparent
                             )
