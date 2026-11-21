@@ -1,0 +1,35 @@
+# Built application files
+*.apk
+*.ap_
+*.aab
+*.dex
+*.class
+
+# Built binaries
+build/
+/build
+*/build
+
+# Gradle files
+.gradle/
+/local.properties
+local.properties
+
+# Android Studio / IntelliJ IDEA files
+.idea/
+*.iml
+
+# Kotlin compilation cache
+.kotlin/
+
+# Agent & temporary artifacts
+.artifacts/
+
+# Native build outputs
+.externalNativeBuild
+.cxx
+/captures
+
+# OS generated files
+.DS_Store
+Thumbs.db
