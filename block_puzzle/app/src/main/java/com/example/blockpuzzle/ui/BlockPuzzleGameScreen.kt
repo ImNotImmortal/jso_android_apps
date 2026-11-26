@@ -10,7 +10,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -63,11 +63,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.blockpuzzle.model.BOARD_SIZE
-import kotlin.math.abs
 import com.example.blockpuzzle.model.BlockPiece
 import com.example.blockpuzzle.model.GameState
 import com.example.blockpuzzle.viewmodel.GameViewModel
+import kotlin.math.floor
 import kotlin.math.round
+import kotlin.math.hypot
 
 @Composable
 fun BlockPuzzleGameScreen(
@@ -78,9 +79,11 @@ fun BlockPuzzleGameScreen(
     val haptic = LocalHapticFeedback.current
 
     var boardBounds by remember { mutableStateOf<Rect?>(null) }
+    var dockBounds by remember { mutableStateOf<Rect?>(null) }
     var draggingPieceIndex by remember { mutableStateOf<Int?>(null) }
     var dragPositionInWindow by remember { mutableStateOf<Offset?>(null) }
     var initialDragPosition by remember { mutableStateOf<Offset?>(null) }
+    var touchRatio by remember { mutableStateOf(0.5f) }
 
     var currentHoverRow by remember { mutableStateOf<Int?>(null) }
     var currentHoverCol by remember { mutableStateOf<Int?>(null) }
@@ -131,26 +134,27 @@ fun BlockPuzzleGameScreen(
                     availablePieces = state.availablePieces,
                     selectedIndex = state.selectedPieceIndex,
                     draggingIndex = draggingPieceIndex,
-                    onPieceSelect = { index ->
-                        gameViewModel.selectPiece(index)
+                    onDockPositioned = { bounds ->
+                        dockBounds = bounds
                     },
-                    onDragStart = { index, initialPosition ->
+                    onDragStart = { index, initialPosition, touchOffset ->
                         gameViewModel.forceSelectPiece(index)
                         draggingPieceIndex = index
                         dragPositionInWindow = initialPosition
                         initialDragPosition = initialPosition
+                        val cardHeightPx = with(density) { 70.dp.toPx() }
+                        touchRatio = (touchOffset.y / cardHeightPx).coerceIn(0f, 1f)
                     },
                     onDrag = { mousePosInWindow ->
                         dragPositionInWindow = mousePosInWindow
                         val bounds = boardBounds
                         val activeIndex = draggingPieceIndex
                         val piece = if (activeIndex != null) state.availablePieces.getOrNull(activeIndex) else null
+                        val dockB = dockBounds
 
-                        if (bounds != null && piece != null) {
+                        if (bounds != null && piece != null && activeIndex != null) {
                             val boardLeft = bounds.left + boardPaddingPx
                             val boardTop = bounds.top + boardPaddingPx
-                            val boardRight = bounds.right - boardPaddingPx
-                            val boardBottom = bounds.bottom - boardPaddingPx
                             val gridWidth = bounds.width - (2 * boardPaddingPx)
                             val cellSizePx = gridWidth / BOARD_SIZE
 
@@ -162,57 +166,44 @@ fun BlockPuzzleGameScreen(
                             val fingerY = mousePosInWindow.y
 
                             val deltaX = fingerX - startPos.x
-                            val deltaY = startPos.y - fingerY
+                            val deltaY = fingerY - startPos.y
+                            val dragDistance = hypot(deltaX, deltaY)
 
-                            val baseOffsetY = with(density) { 30.dp.toPx() }
-                            val extraOffsetY = (deltaY * 0.6f).coerceAtLeast(0f)
-                            val extraOffsetX = deltaX * 0.4f
+                            // Neviditeľná línia presne medzi spodkom hracej plochy a horným okrajom doku (posunutá vyššie)
+                            val baselineY = if (dockB != null) {
+                                bounds.bottom + (dockB.top - bounds.bottom) * 0.35f
+                            } else {
+                                bounds.bottom + with(density) { 20.dp.toPx() }
+                            }
 
-                            val renderX = fingerX - pieceWidthPx / 2f + extraOffsetX
-                            val renderY = fingerY - pieceHeightPx / 2f - baseOffsetY - extraOffsetY
+                            val slotWidth = if (dockB != null) dockB.width / 3f else bounds.width / 3f
+                            val dockLeft = dockB?.left ?: bounds.left
+                            val slotCenterX = dockLeft + slotWidth * activeIndex + slotWidth / 2f
 
-                            val relX = renderX - boardLeft
-                            val relY = renderY - boardTop
+                            val accelFactor = 1f + (dragDistance / 350f).coerceIn(0f, 0.35f)
+                            val renderX = (slotCenterX + deltaX * accelFactor) - pieceWidthPx / 2f
+                            val renderY = (baselineY + deltaY * accelFactor) - pieceHeightPx
+
+                            val pieceCenterX = renderX + pieceWidthPx / 2f
 
                             val maxCol = BOARD_SIZE - piece.cols
                             val maxRow = BOARD_SIZE - piece.rows
 
-                            val rawCol = round(relX / cellSizePx).toInt()
-                            val rawRow = round(relY / cellSizePx).toInt()
-
-                            val col: Int
-                            val row: Int
-
-                            if (currentHoverCol != null && currentHoverRow != null) {
-                                val curC = currentHoverCol!!
-                                val curR = currentHoverRow!!
-                                val cellOffsetX = relX - (curC * cellSizePx)
-                                val cellOffsetY = relY - (curR * cellSizePx)
-
-                                // Magnetická tolerancia (hysteresis deadzone): podrží aktuálnu bunku, kým neprekročíme 20%-80% hranicu
-                                if (abs(rawCol - curC) <= 1 && abs(rawRow - curR) <= 1 &&
-                                    cellOffsetX in (cellSizePx * 0.2f)..(cellSizePx * 0.8f) &&
-                                    cellOffsetY in (cellSizePx * 0.2f)..(cellSizePx * 0.8f)) {
-                                    col = curC
-                                    row = curR
-                                } else {
-                                    col = rawCol.coerceIn(0, maxCol)
-                                    row = rawRow.coerceIn(0, maxRow)
-                                }
+                            val rawCol = round((pieceCenterX - boardLeft) / cellSizePx - piece.cols / 2f).toInt()
+                            val rawRow = if (deltaY < 0) {
+                                // Smer nahor: posunuté presne o 1.5 políčka nadol
+                                floor((renderY - boardTop + cellSizePx * 1.5f) / cellSizePx).toInt()
                             } else {
-                                col = rawCol.coerceIn(0, maxCol)
-                                row = rawRow.coerceIn(0, maxRow)
+                                // Smer nadol: posunuté presne o 1.5 políčka nadol
+                                floor((renderY + pieceHeightPx - boardTop + cellSizePx * 1.5f) / cellSizePx).toInt() - piece.rows
                             }
 
-                            val isInsideGrid = col in 0..maxCol && row in 0..maxRow
-                            val margin = cellSizePx * 0.5f
-                            val isNearBoard = renderX + pieceWidthPx >= (boardLeft - margin) && renderX <= (boardRight + margin) &&
-                                    renderY + pieceHeightPx >= (boardTop - margin) && renderY <= (boardBottom + margin)
+                            val isInsideGrid = rawCol in 0..maxCol && rawRow in 0..maxRow
 
-                            if (isNearBoard && isInsideGrid && gameViewModel.canPlacePiece(piece, state.board, row, col)) {
-                                if (currentHoverRow != row || currentHoverCol != col) {
-                                    currentHoverRow = row
-                                    currentHoverCol = col
+                            if (isInsideGrid && gameViewModel.canPlacePiece(piece, state.board, rawRow, rawCol)) {
+                                if (currentHoverRow != rawRow || currentHoverCol != rawCol) {
+                                    currentHoverRow = rawRow
+                                    currentHoverCol = rawCol
                                     haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                                 }
                             } else {
@@ -234,6 +225,9 @@ fun BlockPuzzleGameScreen(
                         if (row != null && col != null) {
                             gameViewModel.placeSelectedPieceAt(row, col)
                             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        } else {
+                            // Pokiaľ nebol uložený do hracej plochy, pri pustení prsta sa objekt vráti späť do ponuky
+                            gameViewModel.selectPiece(null)
                         }
                         draggingPieceIndex = null
                         dragPositionInWindow = null
@@ -245,12 +239,13 @@ fun BlockPuzzleGameScreen(
                 )
             }
 
-            // Plynulý plávajúci náhľad ťahaného bloku s dynamickým elastickým predstihom
+            // Plynulý plávajúci náhľad ťahaného bloku (zobrazí sa LEN pri stlačení a držaní prstom)
             val activeIndex = draggingPieceIndex
 
             if (activeIndex != null) {
                 val piece = state.availablePieces.getOrNull(activeIndex)
                 val bounds = boardBounds
+                val dockB = dockBounds
 
                 if (piece != null && bounds != null) {
                     val gridWidth = bounds.width - (2 * boardPaddingPx)
@@ -264,26 +259,39 @@ fun BlockPuzzleGameScreen(
                         modifier = Modifier
                             .graphicsLayer {
                                 val pos = dragPositionInWindow
-                                val startPos = initialDragPosition ?: pos ?: Offset.Zero
+
                                 if (pos != null) {
                                     val fingerX = pos.x
                                     val fingerY = pos.y
+                                    val startPos = initialDragPosition ?: pos
 
                                     val deltaX = fingerX - startPos.x
-                                    val deltaY = startPos.y - fingerY
+                                    val deltaY = fingerY - startPos.y
+                                    val dragDistance = hypot(deltaX, deltaY)
 
-                                    val baseOffsetY = with(density) { 30.dp.toPx() }
-                                    val extraOffsetY = (deltaY * 0.6f).coerceAtLeast(0f)
-                                    val extraOffsetX = deltaX * 0.4f
+                                    val baselineY = if (dockB != null) {
+                                        bounds.bottom + (dockB.top - bounds.bottom) * 0.35f
+                                    } else {
+                                        bounds.bottom + with(density) { 20.dp.toPx() }
+                                    }
 
-                                    translationX = fingerX - pieceWidthPx / 2f + extraOffsetX
-                                    translationY = fingerY - pieceHeightPx / 2f - baseOffsetY - extraOffsetY
-                                    shadowElevation = 16.dp.toPx()
-                                    shape = RoundedCornerShape(8.dp)
-                                    clip = false
+                                    val slotWidth = if (dockB != null) dockB.width / 3f else bounds.width / 3f
+                                    val dockLeft = dockB?.left ?: bounds.left
+                                    val slotCenterX = dockLeft + slotWidth * activeIndex + slotWidth / 2f
+
+                                    val accelFactor = 1f + (dragDistance / 350f).coerceIn(0f, 0.35f)
+                                    val renderX = (slotCenterX + deltaX * accelFactor) - pieceWidthPx / 2f
+                                    val renderY = (baselineY + deltaY * accelFactor) - pieceHeightPx
+
+                                    translationX = renderX
+                                    translationY = renderY
                                 } else {
                                     alpha = 0f
                                 }
+
+                                shadowElevation = 0f
+                                shape = RoundedCornerShape(8.dp)
+                                clip = false
                             }
                     ) {
                         PieceShapeView(
@@ -574,15 +582,18 @@ private fun PieceDockSection(
     availablePieces: List<BlockPiece?>,
     selectedIndex: Int?,
     draggingIndex: Int?,
-    onPieceSelect: (Int) -> Unit,
-    onDragStart: (index: Int, initialPosition: Offset) -> Unit,
+    onDockPositioned: (Rect) -> Unit,
+    onDragStart: (index: Int, initialPosition: Offset, touchOffset: Offset) -> Unit,
     onDrag: (position: Offset) -> Unit,
     onDragEnd: () -> Unit
 ) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 8.dp),
+            .padding(vertical = 8.dp)
+            .onGloballyPositioned { coordinates ->
+                onDockPositioned(coordinates.boundsInWindow())
+            },
         colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E2E)),
         shape = RoundedCornerShape(20.dp)
     ) {
@@ -609,19 +620,15 @@ private fun PieceDockSection(
                             piece = piece,
                             isSelected = isSelected,
                             isBeingDragged = isBeingDragged,
-                            onClick = { onPieceSelect(index) },
                             onDragStart = onDragStart,
                             onDrag = onDrag,
                             onDragEnd = onDragEnd
                         )
                     } else {
-                        Box(
+                        Spacer(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(70.dp)
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(Color(0xFF151522))
-                                .border(1.dp, Color(0xFF2A2A3D), RoundedCornerShape(12.dp))
                         )
                     }
                 }
@@ -636,8 +643,7 @@ private fun PiecePreviewCard(
     piece: BlockPiece,
     isSelected: Boolean,
     isBeingDragged: Boolean,
-    onClick: () -> Unit,
-    onDragStart: (index: Int, initialPosition: Offset) -> Unit,
+    onDragStart: (index: Int, initialPosition: Offset, touchOffset: Offset) -> Unit,
     onDrag: (position: Offset) -> Unit,
     onDragEnd: () -> Unit
 ) {
@@ -645,14 +651,13 @@ private fun PiecePreviewCard(
 
     val scale by animateFloatAsState(
         targetValue = when {
-            isBeingDragged -> 0.95f
-            isSelected -> 1.08f
+            isBeingDragged || isSelected -> 0.95f
             else -> 1.0f
         },
         label = "pieceScale"
     )
     val alpha by animateFloatAsState(
-        targetValue = if (isBeingDragged) 0.35f else 1.0f,
+        targetValue = if (isBeingDragged || isSelected) 0f else 1.0f,
         label = "pieceAlpha"
     )
 
@@ -669,27 +674,34 @@ private fun PiecePreviewCard(
                 cardPositionInWindow = coordinates.boundsInWindow().topLeft
             }
             .pointerInput(index) {
-                detectDragGestures(
-                    onDragStart = { startOffset ->
+                awaitPointerEventScope {
+                    while (true) {
+                        val down = awaitFirstDown(requireUnconsumed = false)
                         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        val startOffset = down.position
                         val startPos = cardPositionInWindow + startOffset
                         currentDragPos = startPos
-                        onDragStart(index, startPos)
-                    },
-                    onDragEnd = {
-                        onDragEnd()
-                    },
-                    onDragCancel = {
-                        onDragEnd()
-                    },
-                    onDrag = { change, dragAmount ->
-                        change.consume()
-                        currentDragPos += dragAmount
-                        onDrag(currentDragPos)
+                        onDragStart(index, startPos, startOffset)
+
+                        var upOrCancel = false
+                        while (!upOrCancel) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull { it.id == down.id }
+                            if (change == null || !change.pressed) {
+                                upOrCancel = true
+                                onDragEnd()
+                            } else {
+                                val dragAmount = change.position - change.previousPosition
+                                if (dragAmount != Offset.Zero) {
+                                    change.consume()
+                                    currentDragPos += dragAmount
+                                    onDrag(currentDragPos)
+                                }
+                            }
+                        }
                     }
-                )
-            }
-            .clickable { onClick() },
+                }
+            },
         contentAlignment = Alignment.Center
     ) {
         PieceShapeView(piece = piece)
